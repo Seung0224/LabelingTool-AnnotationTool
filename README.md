@@ -5,6 +5,10 @@ Windows 환경에서 **Segmentation 마스크 라벨링**을 직관적으로 생
 
 ---
 
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/61acca3a-380c-473a-badd-ed4579a1bf91" />
+
+---
+
 ![데모 시연](./assets/VIDEO.gif)
 
 ## 📦 프로젝트 개요
@@ -160,13 +164,14 @@ SmartLabelingApp/
 
 ## 📦 릴리즈 노트
 
-| 날짜         | 버전     | 주요 변경 내용                                                 |
-| ---------- | ------ | -------------------------------------------------------- |
-| 2025-08-18 | v0.9.0 | YOLOv11 Segmentation GUI (Tkinter, Python) 초기 구현         |
-| 2025-08-19 | v0.9.1 | YOLOv11 Segmentation 전용 WinForms 앱 구조 도입                 |
-| 2025-08-21 | v1.0.0 | WinForms + Guna.UI2 UI 구축, 기본 툴 (Pointer/Box/Polygon) 지원 |
-| 2025-08-26 | v1.1.0 | Circle, Triangle, Ngon, Brush, Eraser, Mask, AI Tool 추가  |
-| 2025-08-27 | v1.1.1 | 라벨 칩 UI + Default Label 시스템, Add Vertex 기능 추가            |
-| 2025-08-29 | v1.2.0 | Pretrained Weights 다운로드/진행률 UI 및 가상환경 관리 기능              |
+| 날짜         | 버전     | 주요 변경 내용                                                       |
+| ---------- | ------ | --------------------------------------------------------                 |
+| 2025-08-18 | v0.9.0 | YOLOv11 Segmentation GUI (Tkinter, Python) 초기 구현                      |
+| 2025-08-19 | v0.9.1 | YOLOv11 Segmentation 전용 WinForms 앱 구조 도입                           |
+| 2025-08-21 | v1.0.0 | WinForms + Guna.UI2 UI 구축, 기본 툴 (Pointer/Box/Polygon) 지원           |
+| 2025-08-26 | v1.1.0 | Circle, Triangle, Ngon, Brush, Eraser, Mask, AI Tool 추가                |
+| 2025-08-27 | v1.1.1 | 라벨 칩 UI + Default Label 시스템, Add Vertex 기능 추가                    |
+| 2025-08-29 | v1.2.0 | Pretrained Weights 다운로드/진행률 UI 및 가상환경 관리 기능                 |
 | 2025-09-01 | v1.2.1 | 단축키 확장 (Ctrl+C, Ctrl+V, Ctrl+A, 회전/이동/확대 단축키) 및 문서 최적화   |
-| (예정)       | v1.3.0 | 라벨링 결과 자동 저장/불러오기, Dataset Export 개선                     |
+| 2025-09-13 | v1.3.0 | 라벨링 결과 자동 저장/불러오기, Dataset Export 개선                         |
+| 2025-09-26 | v1.3.1 | onnx, engine 추론 기능 추가 완료                                           |
