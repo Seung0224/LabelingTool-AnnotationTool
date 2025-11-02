@@ -1053,7 +1053,9 @@ namespace SmartLabelingApp
             "Enter: AI 프리폼 확정 (AI Tool 전용), " +
             "Esc: AI 프리폼 취소 (AI Tool 전용), " +
             "Ctrl+E: 폴더 일괄 라벨링 (AI ROI Tool 전용), " +
-            "Ctrl+D: ROI 즉시 분할 + 폴리곤 확정 (AI ROI Tool전용)"
+            "Ctrl+D: ROI 즉시 분할 + 폴리곤 확정 (AI ROI Tool전용), " +
+            "Ctrl+O: 색상맵 전체 적용 후 바탕화면 저장"
+
             );
 
             LoadLastExportZipPath();
@@ -2510,6 +2512,11 @@ namespace SmartLabelingApp
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (keyData == (Keys.Control | Keys.O))
+            {
+                RunColorMapBatchToDesktop(120, 154);
+                return true;
+            }
             if (keyData == (Keys.Control | Keys.S))
             {
                 OnSaveClick(_btnSave, null);
@@ -4943,6 +4950,7 @@ namespace SmartLabelingApp
             return "Default";
         }
         #endregion
+
         #region 7) ColorMap 관련 기능 구현
 
         #region Fields
@@ -4969,21 +4977,15 @@ namespace SmartLabelingApp
         private ushort _lut8_min, _lut8_max;  // 캐시된 LUT의 min/max
         #endregion
 
+        #region Functions
         private static void Log(string msg) => Trace.WriteLine($"[ColorMap] {DateTime.Now:HH:mm:ss.fff} {msg}");
-
-        // ───────────────────────────────────────────────────────────────
-        // 진입점
-        // ───────────────────────────────────────────────────────────────
         private void OnColorMapClick(object sender = null, EventArgs e = null)
         {
             if (_canvas?.Image == null) return;
             _canvas.Image.Tag = _currentImagePath;
 
             var cur = _canvas.Image as Bitmap;
-            // ⚠️ GDI+는 16bit Gray라도 32bppArgb로 올라옴 → 여기서 비트판단 금지
-            // 실제 비트 판단은 BuildIntensityCache에서 WIC로 수행함.
 
-            // ✅ 소스가 없었거나 (해상도/레퍼런스) 바뀌었으면 완전 리셋
             if (_colorMapOriginal == null
                 || !_colorMapOriginal.Size.Equals(cur.Size)
                 || !ReferenceEquals(_lastBoundSource, _canvas.Image))
@@ -4992,13 +4994,11 @@ namespace SmartLabelingApp
                 _lastBoundSource = _canvas.Image;
             }
 
-            // 컬러맵 창 생성(한 번)
             if (_colorMapWin == null || _colorMapWin.IsDisposed)
             {
                 _colorMapWin = new ColorMapWindow();
                 _colorMapWin.FormClosing += (s, ev) => { ev.Cancel = true; _colorMapWin.Hide(); };
 
-                // 실시간 프리뷰/드래그 종료
                 _colorMapWin.OnLiveUpdate = (min, max) => { _pendingMin = min; _pendingMax = max; _isDragging = true; };
                 _colorMapWin.OnColorChanged = _ => { _isDragging = false; ApplyColorMapFull(_colorMapWin.SelectedMin, _colorMapWin.SelectedMax); };
 
@@ -5007,11 +5007,9 @@ namespace SmartLabelingApp
                 _liveThrottle.Start();
             }
 
-            // ✅ 현재 실제 비트깊이에 맞게 "매번" UI 범위 재설정
             _colorMapWin.ConfigureForBitDepth(_srcIs16 ? 16 : 8);
             _colorMapWin.SetInitialRange(0, (ushort)(_srcIs16 ? 65535 : 255));
 
-            // 첫 적용
             ApplyColorMapFull(_colorMapWin.SelectedMin, _colorMapWin.SelectedMax);
             _colorMapWin.Show();
             _colorMapWin.Activate();
@@ -5053,10 +5051,6 @@ namespace SmartLabelingApp
             _lut8_max = maxU;
             return lut;
         }
-
-        // ───────────────────────────────────────────────────────────────
-        // 강도 캐시 구축 (WIC로 16bit 감지/로딩 → 실패 시 G채널 8bit)
-        // ───────────────────────────────────────────────────────────────
         private void BuildIntensityCache(Bitmap src)
         {
             int w = src.Width, h = src.Height;
@@ -5167,11 +5161,6 @@ namespace SmartLabelingApp
                 return false;
             }
         }
-
-
-        // ───────────────────────────────────────────────────────────────
-        // 버퍼 준비
-        // ───────────────────────────────────────────────────────────────
         private void BuildOrResizeDst(int w, int h)
         {
             bool needNew = true;
@@ -5192,7 +5181,6 @@ namespace SmartLabelingApp
             if (_canvas != null && _canvas.Image == null)
                 _canvas.Image = _dst32;
         }
-
         private void BuildOrResizePreview(int w, int h, int step)
         {
             int pw = Math.Max(1, w / step);
@@ -5209,10 +5197,6 @@ namespace SmartLabelingApp
             try { _preview32?.Dispose(); } catch { }
             _preview32 = new Bitmap(pw, ph, PixelFormat.Format32bppArgb);
         }
-
-        // ───────────────────────────────────────────────────────────────
-        // 256 LUT
-        // ───────────────────────────────────────────────────────────────
         private void EnsurePalette256()
         {
             if (_palette256 != null) return;
@@ -5229,10 +5213,6 @@ namespace SmartLabelingApp
                                | (uint)(b * 255);
             }
         }
-
-        // ───────────────────────────────────────────────────────────────
-        // 소스 교체 전체 리셋
-        // ───────────────────────────────────────────────────────────────
         private void ResetColorMapStateForNewSource(Image newSrc)
         {
             // Canvas에서 분리 후 버퍼 폐기
@@ -5266,12 +5246,8 @@ namespace SmartLabelingApp
                 _canvas.Image = _dst32;
         }
 
-        // ───────────────────────────────────────────────────────────────
-        // 스케일 계산(8/16bit 자동 구분)
-        // ───────────────────────────────────────────────────────────────
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void ComputeScale16_16(ushort minU, ushort maxU, bool is16bit,
-                                              out int scaleMul, out long scaleAdd)
+        private static void ComputeScale16_16(ushort minU, ushort maxU, bool is16bit, out int scaleMul, out long scaleAdd)
         {
             int min = minU;
             int max = Math.Max(min + 1, (int)maxU);
@@ -5285,11 +5261,6 @@ namespace SmartLabelingApp
             scaleAdd = -((long)min * scaleMul);
         }
 
-
-
-        // ───────────────────────────────────────────────────────────────
-        // Preview (다운샘플)
-        // ───────────────────────────────────────────────────────────────
         private void ApplyColorMapPreview(ushort minU, ushort maxU)
         {
             if (_dst32 == null || _preview32 == null) return;
@@ -5376,11 +5347,6 @@ namespace SmartLabelingApp
             finally { _cmBusy = false; }
         }
 
-
-
-        // ───────────────────────────────────────────────────────────────
-        // Full (원본 해상도 적용)
-        // ───────────────────────────────────────────────────────────────
         private void ApplyColorMapFull(ushort minU, ushort maxU)
         {
             if (_dst32 == null) return;
@@ -5452,7 +5418,254 @@ namespace SmartLabelingApp
             finally { _cmBusy = false; }
         }
 
+        private void RunColorMapBatchToDesktop(ushort min, ushort max)
+        {
+            try
+            {
+                if (min >= max) throw new ArgumentException("min must be smaller than max.");
 
+                var baseDir = GetCurrentImageFolder();
+                if (string.IsNullOrEmpty(baseDir) || !Directory.Exists(baseDir))
+                {
+                    new Guna.UI2.WinForms.Guna2MessageDialog
+                    {
+                        Parent = this,
+                        Caption = "ColorMap Export",
+                        Text = "현재 이미지의 기준 폴더를 찾을 수 없습니다.",
+                        Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
+                        Icon = Guna.UI2.WinForms.MessageDialogIcon.Warning,
+                        Style = Guna.UI2.WinForms.MessageDialogStyle.Light
+                    }.Show();
+                    return;
+                }
+
+                var outDir = GetDesktopResultFolder();
+
+                var paths = EnumerateTopImagesInFolder(baseDir)
+                            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+
+                if (paths.Count == 0)
+                {
+                    new Guna.UI2.WinForms.Guna2MessageDialog
+                    {
+                        Parent = this,
+                        Caption = "ColorMap Export",
+                        Text = "처리할 이미지가 없습니다.",
+                        Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
+                        Icon = Guna.UI2.WinForms.MessageDialogIcon.Warning,
+                        Style = Guna.UI2.WinForms.MessageDialogStyle.Light
+                    }.Show();
+                    return;
+                }
+
+                int total = paths.Count;
+                int okCnt = 0, failCnt = 0;
+
+                using (var overlay = new ProgressOverlay(this, "ColorMap Export...", true))
+                {
+                    for (int i = 0; i < total; i++)
+                    {
+                        string src = paths[i];
+                        string nameNoExt = Path.GetFileNameWithoutExtension(src);
+                        string dst = Path.Combine(outDir, nameNoExt + ".png");
+
+                        overlay.Report((i * 100) / Math.Max(1, total), $"{i + 1}/{total} - {Path.GetFileName(src)}");
+
+                        try
+                        {
+                            bool ok = ApplyColorMapAndSaveOne(src, dst, min, max);
+                            if (ok) okCnt++; else failCnt++;
+                        }
+                        catch
+                        {
+                            failCnt++;
+                        }
+                    }
+
+                    overlay.Report(100, "완료");
+                }
+
+                new Guna.UI2.WinForms.Guna2MessageDialog
+                {
+                    Parent = this,
+                    Caption = "ColorMap Export",
+                    Text = $"총 {total}개\n성공: {okCnt}\n실패: {failCnt}\n출력 폴더: {outDir}",
+                    Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
+                    Icon = Guna.UI2.WinForms.MessageDialogIcon.Information,
+                    Style = Guna.UI2.WinForms.MessageDialogStyle.Light
+                }.Show();
+            }
+            catch (Exception ex)
+            {
+                new Guna.UI2.WinForms.Guna2MessageDialog
+                {
+                    Parent = this,
+                    Caption = "ColorMap Export",
+                    Text = "오류: " + ex.Message,
+                    Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
+                    Icon = Guna.UI2.WinForms.MessageDialogIcon.Error,
+                    Style = Guna.UI2.WinForms.MessageDialogStyle.Light
+                }.Show();
+            }
+        }
+
+        private bool ApplyColorMapAndSaveOne(string srcPath, string dstPath, ushort min, ushort max)
+        {
+            // 공용 팔레트/LUT 빌드
+            EnsurePalette256();
+
+            // 1) Gray16(WIC) 시도
+            if (TryLoadGray16WithWIC(srcPath, out var buf16, out int w16, out int h16))
+            {
+                // 16-bit 경로
+                ComputeScale16_16(min, max, true, out int scaleMul, out long scaleAdd);
+                using (var dst = new Bitmap(w16, h16, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                {
+                    var rect = new Rectangle(0, 0, w16, h16);
+                    var bd = dst.LockBits(rect, System.Drawing.Imaging.ImageLockMode.WriteOnly, dst.PixelFormat);
+                    try
+                    {
+                        unsafe
+                        {
+                            Parallel.For(0, h16, y =>
+                            {
+                                uint* drow = (uint*)((byte*)bd.Scan0 + y * bd.Stride); // ← 각 스레드 지역 변수
+                                int ofs = y * w16;                                  // ← 각 스레드 지역 변수
+                                for (int x = 0; x < w16; x++)
+                                {
+                                    int idx = (int)(((long)buf16[ofs + x] * scaleMul + scaleAdd) >> 16);
+                                    drow[x] = (idx <= 0 || idx >= 255) ? 0xFF000000u : _palette256[idx];
+                                }
+                            });
+                        }
+                    }
+                    finally { dst.UnlockBits(bd); }
+
+                    dst.Save(dstPath, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                return true;
+            }
+
+            // 2) 8-bit 경로 (luma)
+            if (!LoadAs8BitLuma(srcPath, out var buf8, out int w, out int h))
+                return false;
+
+            // LUT 캐시 활용 (min/max가 동일하면 재사용)
+            var lut = GetOrBuildLut8(min, max);
+
+            using (var dst = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                var rect = new Rectangle(0, 0, w, h);
+                var bd = dst.LockBits(rect, System.Drawing.Imaging.ImageLockMode.WriteOnly, dst.PixelFormat);
+                try
+                {
+                    unsafe
+                    {
+                        Parallel.For(0, h, y =>
+                        {
+                            uint* drow = (uint*)((byte*)bd.Scan0 + y * bd.Stride); // ← 각 스레드 지역 변수
+                            int ofs = y * w;                                    // ← 각 스레드 지역 변수
+                            for (int x = 0; x < w; x++)
+                            {
+                                drow[x] = lut[buf8[ofs + x]];
+                            }
+                        });
+                    }
+                }
+                finally { dst.UnlockBits(bd); }
+
+                dst.Save(dstPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            return true;
+        }
+
+        private bool LoadAs8BitLuma(string path, out byte[] buf, out int w, out int h)
+        {
+            buf = null; w = 0; h = 0;
+
+            try
+            {
+                using (var src = new Bitmap(path))
+                {
+                    // 람다에서 캡처하지 않을 로컬 변수
+                    int width = src.Width;
+                    int height = src.Height;
+                    var tmp = new byte[width * height];
+
+                    var rect = new Rectangle(0, 0, width, height);
+                    var bd = src.LockBits(rect, ImageLockMode.ReadOnly, src.PixelFormat);
+
+                    try
+                    {
+                        int bpp = Image.GetPixelFormatSize(src.PixelFormat) / 8;
+                        if (bpp < 1) return false;
+
+                        unsafe
+                        {
+                            byte* sbase = (byte*)bd.Scan0;
+
+                            if (bpp == 1)
+                            {
+                                // 8bpp 인덱스/그레이: 그대로 복사
+                                for (int y = 0; y < height; y++)
+                                {
+                                    byte* srow = sbase + y * bd.Stride;
+                                    int ofs = y * width;
+                                    for (int x = 0; x < width; x++)
+                                        tmp[ofs + x] = srow[x];
+                                }
+                            }
+                            else
+                            {
+                                // 24/32bpp 등: BGR[ A ] 가정 → BT.601 luma
+                                Parallel.For(0, height, y =>
+                                {
+                                    byte* srow = sbase + y * bd.Stride;
+                                    int ofs = y * width;
+
+                                    for (int x = 0; x < width; x++)
+                                    {
+                                        int p = x * bpp; // 픽셀 시작 인덱스
+                                        byte b = srow[p + 0];
+                                        byte g = srow[p + 1];
+                                        byte r = srow[p + 2];
+                                        tmp[ofs + x] = (byte)((r * 77 + g * 150 + b * 29 + 128) >> 8);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        src.UnlockBits(bd);
+                    }
+
+                    // 병렬 처리 후 out 변수에 대입 (람다 밖)
+                    buf = tmp;
+                    w = width;
+                    h = height;
+                    return true;
+                }
+            }
+            catch
+            {
+                buf = null; w = h = 0;
+                return false;
+            }
+        }
+
+        private static string GetDesktopResultFolder()
+        {
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            if (string.IsNullOrEmpty(desktop))
+                desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop); // 호환 폴백
+
+            string dir = Path.Combine(desktop, "ResultColorMap");
+            try { Directory.CreateDirectory(dir); } catch { /* 이미 존재/권한 이슈 무시 */ }
+            return dir;
+        }
+        #endregion
 
         #endregion
 
