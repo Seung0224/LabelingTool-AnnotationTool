@@ -1060,7 +1060,7 @@ namespace SmartLabelingApp
             "Esc: AI 프리폼 취소 (AI Tool 전용), " +
             "Ctrl+E: 폴더 일괄 라벨링 (AI ROI Tool 전용), " +
             "Ctrl+D: ROI 즉시 분할 + 폴리곤 확정 (AI ROI Tool전용), " +
-            "Ctrl+O: 색상맵 전체 적용 후 바탕화면 저장," +
+            "Ctrl+O: 색상맵 바탕화면 저장, " +
             "Ctrl+U: 색상맵 만 레이블링 적용"
             );
 
@@ -2531,7 +2531,8 @@ namespace SmartLabelingApp
         {
             if (keyData == (Keys.Control | Keys.U))
             {
-                RunAutoLabelBatchForFolder();
+                OnAutoLabelFromColormap_LessThanThreshold();
+                // RunAutoLabelBatchForFolder();
                 return true;
             }
             if (keyData == (Keys.Control | Keys.O))
