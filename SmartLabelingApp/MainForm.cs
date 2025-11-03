@@ -43,6 +43,10 @@ namespace SmartLabelingApp
         #endregion
         #region 1) Constants & Static Data (상수/정적 데이터)
 
+
+        private const byte COLORMAP_TARGET_START_VALUE = 146;
+        private const byte COLORMAP_TARGET_END_VALUE = 255;
+
         private const string DEFAULT_MODEL_PATH = @"D:\SLA_Model\AnnotationData\best.onnx";
         private string _currentModelName = "UNKNOWN";
         private System.Threading.CancellationTokenSource _autoInferCts;
@@ -105,6 +109,8 @@ namespace SmartLabelingApp
         private const int OUTER_MARGIN = 9;      // 작업영역 하단 여백(바닥에 딱 붙지 않게)
 
         private const int LABEL_CHIP_MIN_W = 74;
+
+        private string _savePathOverride;
 
         private Guna2Panel _logPanel;
         private ListBox _logListBox;
@@ -1054,8 +1060,8 @@ namespace SmartLabelingApp
             "Esc: AI 프리폼 취소 (AI Tool 전용), " +
             "Ctrl+E: 폴더 일괄 라벨링 (AI ROI Tool 전용), " +
             "Ctrl+D: ROI 즉시 분할 + 폴리곤 확정 (AI ROI Tool전용), " +
-            "Ctrl+O: 색상맵 전체 적용 후 바탕화면 저장"
-
+            "Ctrl+O: 색상맵 전체 적용 후 바탕화면 저장," +
+            "Ctrl+U: 색상맵 만 레이블링 적용"
             );
 
             LoadLastExportZipPath();
@@ -2014,13 +2020,16 @@ namespace SmartLabelingApp
         {
             try
             {
+                string savePath = !string.IsNullOrEmpty(_savePathOverride) ? _savePathOverride : _currentImagePath;
+                _savePathOverride = null; // 한번 쓰고 즉시 해제
+
                 if (_canvas == null || _canvas.Image == null)
                 {
                     MessageBox.Show(this, "이미지가 없습니다.", "SAVE", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
 
-                SaveDatasetYoloWithImages();
+                SaveDatasetYoloWithImages(savePath);
                 bool keepAiRoi = (_aiSubMode == AiSubMode.Roi) && _canvas != null && _canvas.Mode == ToolMode.AI;
 
 
@@ -2047,6 +2056,14 @@ namespace SmartLabelingApp
             {
                 if (_canvas != null && !_canvas.Focused) _canvas.Focus();
             }
+        }
+
+        private static string MakeLabelSavePathFromSource(string srcPath)
+        {
+            string dir = Path.Combine(Path.GetDirectoryName(srcPath), "_labels");
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            string stem = Path.GetFileNameWithoutExtension(srcPath);
+            return Path.Combine(dir, stem + "_label.png");
         }
 
         private string PickAnnotationDataFolderWithCommonDialog(string initialDir = null)
@@ -2514,13 +2531,12 @@ namespace SmartLabelingApp
         {
             if (keyData == (Keys.Control | Keys.U))
             {
-                // OnAutoLabelFromColormap_LessThanThreshold();
                 RunAutoLabelBatchForFolder();
                 return true;
             }
             if (keyData == (Keys.Control | Keys.O))
             {
-                RunColorMapBatchToDesktop(146, 255);
+                RunColorMapBatchToDesktop(COLORMAP_TARGET_START_VALUE, COLORMAP_TARGET_END_VALUE);
                 return true;
             }
             if (keyData == (Keys.Control | Keys.S))
@@ -3743,22 +3759,24 @@ namespace SmartLabelingApp
             if (classes.Count == 0) classes.Add("Default");
             return classes;
         }
-        private void SaveDatasetYoloWithImages()
+        // 기존: private void SaveDatasetYoloWithImages()
+        private void SaveDatasetYoloWithImages(string srcImagePath = null)
         {
+            // 1) 유효 경로 결정 (인자 우선, 없으면 _currentImagePath)
+            string imagePath = !string.IsNullOrEmpty(srcImagePath) ? srcImagePath : _currentImagePath;
+
             if (_canvas == null || _canvas.Image == null)
                 throw new InvalidOperationException("이미지가 없습니다.");
 
-            if (string.IsNullOrEmpty(_currentImagePath) || !File.Exists(_currentImagePath))
+            if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
                 throw new InvalidOperationException("현재 이미지 경로를 찾을 수 없습니다.");
 
-
-            var baseDir = Path.GetDirectoryName(_currentImagePath);
+            // 2) 이하 모든 _currentImagePath 참조를 imagePath로 교체
+            var baseDir = Path.GetDirectoryName(imagePath);
             var annotationRoot = Path.Combine(baseDir, "AnnotationData");
             var rootDir = Path.Combine(annotationRoot, "Model");
 
-
             LabelStatusService.SetStorageRoot(annotationRoot);
-
 
             var imagesDir = Path.Combine(rootDir, "images");
             var labelsDir = Path.Combine(rootDir, "labels");
@@ -3767,18 +3785,15 @@ namespace SmartLabelingApp
             Directory.CreateDirectory(labelsDir);
             Directory.CreateDirectory(masksDir);
 
-
             var classes = GetCurrentClasses();
             File.WriteAllLines(Path.Combine(rootDir, "classes.txt"), classes, Encoding.UTF8);
             SaveNotesJson(Path.Combine(rootDir, "notes.json"), classes);
             _lastYoloExportRoot = rootDir;
 
-
-            var srcExt = Path.GetExtension(_currentImagePath);
-            var baseName = Path.GetFileNameWithoutExtension(_currentImagePath);
+            var srcExt = Path.GetExtension(imagePath);
+            var baseName = Path.GetFileNameWithoutExtension(imagePath);
             var dstImagePath = Path.Combine(imagesDir, baseName + srcExt);
-            File.Copy(_currentImagePath, dstImagePath, true);
-
+            File.Copy(imagePath, dstImagePath, true);
 
             var dstLabelPath = Path.Combine(labelsDir, baseName + ".txt");
             WriteYoloLabelForCurrentImage(dstLabelPath, classes);
@@ -3789,18 +3804,17 @@ namespace SmartLabelingApp
                 if (mask != null) mask.Save(dstMaskPath, ImageFormat.Png);
             }
 
-
-            LabelStatusService.MarkLabeled(_currentImagePath, _canvas.Shapes.Count);
-
+            LabelStatusService.MarkLabeled(imagePath, _canvas.Shapes.Count);
 
             try
             {
-                var node = FindNodeByImagePath(_currentImagePath);
+                var node = FindNodeByImagePath(imagePath);
                 if (node != null)
-                    LabelStatusService.ApplyNodeState(node, _currentImagePath, _lastYoloExportRoot, showCountSuffix: true);
+                    LabelStatusService.ApplyNodeState(node, imagePath, _lastYoloExportRoot, showCountSuffix: true);
             }
             catch { }
         }
+
 
         private TreeNode FindNodeByImagePath(string fullPath)
         {
@@ -5672,10 +5686,6 @@ namespace SmartLabelingApp
             return dir;
         }
 
-
-        // ================== Ctrl+U: 컬러맵(그레이=146) 자동 라벨 ==================
-        private const byte COLORMAP_TARGET_VALUE = 146;
-
         // Ctrl+U 핫키 핸들러
 
         // 8-이웃 팽창: radius=1 -> 상하좌우+대각 1픽셀 확장
@@ -5780,29 +5790,28 @@ namespace SmartLabelingApp
                     for (int i = 0; i < total; i++)
                     {
                         string src = paths[i];
-
                         overlay.Report((i * 100) / Math.Max(1, total),
                                        $"{i + 1}/{total} - {Path.GetFileName(src)}");
 
                         try
                         {
-                            // 1) 이미지 로드 → 캔버스에 세팅
+                            // 1) 이미지 로드
                             using (var bmp = LoadBitmapUnlocked(src))
                             {
-                                SetCanvasImageForBatch(bmp);   // 아래 3) 헬퍼
+                                SetCanvasImageForBatch(bmp); // 캔버스 이미지 교체 + ZoomToFit 등
                             }
 
-                            // 2) 이전 라벨/도형 초기화 (프로젝트 규약에 맞게)
+                            // 2) 기존 도형 초기화(겹침 방지)
                             try { _canvas.Shapes?.Clear(); } catch { /* ignore */ }
 
-                            // 3) 레이블링 동기 실행 (한 장 처리)
-                            int added = AutoLabelFromCanvasSync();  // 아래 4) 코어
+                            // 3) 자동 레이블링(컬러맵 기반) 한 장 처리
+                            int added = AutoLabelFromCanvasSync(); // 이전에 만든 동기 코어 사용
 
-                            // 4) 저장(기존 저장 로직 그대로 사용)
-                            //    - 기존 Ctrl+S 핸들러와 동일 동작
+                            // 4) 저장 경로 주입 → 기존 저장 로직 호출
+                            _savePathOverride = src;
                             OnSaveClick(_btnSave, null);
 
-                            if (added > 0) okCnt++; else okCnt++; // added=0이어도 저장 자체는 성공 흐름으로 간주
+                            okCnt++;
                         }
                         catch
                         {
@@ -5836,6 +5845,7 @@ namespace SmartLabelingApp
                 }.Show();
             }
         }
+
         private static Bitmap LoadBitmapUnlocked(string path)
         {
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -5879,7 +5889,7 @@ namespace SmartLabelingApp
                     for (int x = 0; x < w; x++, idx++)
                     {
                         byte v = buf[idx];
-                        bool isFg = (v > 0 && v < COLORMAP_TARGET_VALUE);
+                        bool isFg = (v > 0 && v < COLORMAP_TARGET_START_VALUE);
                         bin[y, x] = isFg;
                         if (isFg) trueCount++;
                     }
@@ -5961,7 +5971,7 @@ namespace SmartLabelingApp
                         for (int x = 0; x < w; x++, idx++)
                         {
                             byte v = buf[idx];
-                            bool isFg = (v > 0 && v < COLORMAP_TARGET_VALUE);
+                            bool isFg = (v > 0 && v < COLORMAP_TARGET_START_VALUE);
                             bin[y, x] = isFg;
                             if (isFg) trueCount++;
                         }
