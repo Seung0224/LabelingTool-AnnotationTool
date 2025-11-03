@@ -2512,9 +2512,15 @@ namespace SmartLabelingApp
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (keyData == (Keys.Control | Keys.U))
+            {
+                // OnAutoLabelFromColormap_LessThanThreshold();
+                RunAutoLabelBatchForFolder();
+                return true;
+            }
             if (keyData == (Keys.Control | Keys.O))
             {
-                RunColorMapBatchToDesktop(120, 154);
+                RunColorMapBatchToDesktop(146, 255);
                 return true;
             }
             if (keyData == (Keys.Control | Keys.S))
@@ -5665,6 +5671,699 @@ namespace SmartLabelingApp
             try { Directory.CreateDirectory(dir); } catch { /* 이미 존재/권한 이슈 무시 */ }
             return dir;
         }
+
+
+        // ================== Ctrl+U: 컬러맵(그레이=146) 자동 라벨 ==================
+        private const byte COLORMAP_TARGET_VALUE = 146;
+
+        // Ctrl+U 핫키 핸들러
+
+        // 8-이웃 팽창: radius=1 -> 상하좌우+대각 1픽셀 확장
+        private static bool[,] DilateMaskDirectional(bool[,] src, int left, int right, int top, int bottom)
+        {
+            int h = src.GetLength(0);
+            int w = src.GetLength(1);
+            bool[,] dst = new bool[h, w];
+
+            for (int y = 0; y < h; y++)
+            {
+                for (int x = 0; x < w; x++)
+                {
+                    if (!src[y, x]) continue;
+
+                    // 확장/축소 대상 범위 계산
+                    int x0 = Math.Max(0, x + left);
+                    int x1 = Math.Min(w - 1, x + right);
+                    int y0 = Math.Max(0, y + top);
+                    int y1 = Math.Min(h - 1, y + bottom);
+
+                    for (int yy = y0; yy <= y1; yy++)
+                    {
+                        for (int xx = x0; xx <= x1; xx++)
+                        {
+                            dst[yy, xx] = true;
+                        }
+                    }
+                }
+            }
+            return dst;
+        }
+        // (h,w) → (h+2, w+2)로 False 패딩한 새 마스크 생성
+        private static bool[,] PadFalseBorder(bool[,] src)
+        {
+            int h = src.GetLength(0), w = src.GetLength(1);
+            bool[,] dst = new bool[h + 2, w + 2];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    dst[y + 1, x + 1] = src[y, x];
+            return dst;
+        }
+
+        // 패딩 좌표를 원래 이미지 좌표로 되돌림 (pad=1이면 -1,-1 이동)
+        private static List<List<PointF>> UnpadContours(List<List<PointF>> contours, float padX, float padY)
+        {
+            var outList = new List<List<PointF>>(contours.Count);
+            for (int i = 0; i < contours.Count; i++)
+            {
+                var c = contours[i];
+                if (c == null) continue;
+                var cc = new List<PointF>(c.Count);
+                for (int k = 0; k < c.Count; k++)
+                    cc.Add(new PointF(c[k].X - padX, c[k].Y - padY));
+                outList.Add(cc);
+            }
+            return outList;
+        }
+
+        private void RunAutoLabelBatchForFolder()
+        {
+            try
+            {
+                var baseDir = GetCurrentImageFolder();
+                if (string.IsNullOrEmpty(baseDir) || !Directory.Exists(baseDir))
+                {
+                    new Guna.UI2.WinForms.Guna2MessageDialog
+                    {
+                        Parent = this,
+                        Caption = "Batch Labeling",
+                        Text = "현재 이미지의 기준 폴더를 찾을 수 없습니다.",
+                        Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
+                        Icon = Guna.UI2.WinForms.MessageDialogIcon.Warning,
+                        Style = Guna.UI2.WinForms.MessageDialogStyle.Light
+                    }.Show();
+                    return;
+                }
+
+                var paths = EnumerateTopImagesInFolder(baseDir)
+                            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+
+                if (paths.Count == 0)
+                {
+                    new Guna.UI2.WinForms.Guna2MessageDialog
+                    {
+                        Parent = this,
+                        Caption = "Batch Labeling",
+                        Text = "처리할 이미지가 없습니다.",
+                        Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
+                        Icon = Guna.UI2.WinForms.MessageDialogIcon.Warning,
+                        Style = Guna.UI2.WinForms.MessageDialogStyle.Light
+                    }.Show();
+                    return;
+                }
+
+                int total = paths.Count;
+                int okCnt = 0, failCnt = 0;
+
+                using (var overlay = new ProgressOverlay(this, "Batch Labeling...", true))
+                {
+                    for (int i = 0; i < total; i++)
+                    {
+                        string src = paths[i];
+
+                        overlay.Report((i * 100) / Math.Max(1, total),
+                                       $"{i + 1}/{total} - {Path.GetFileName(src)}");
+
+                        try
+                        {
+                            // 1) 이미지 로드 → 캔버스에 세팅
+                            using (var bmp = LoadBitmapUnlocked(src))
+                            {
+                                SetCanvasImageForBatch(bmp);   // 아래 3) 헬퍼
+                            }
+
+                            // 2) 이전 라벨/도형 초기화 (프로젝트 규약에 맞게)
+                            try { _canvas.Shapes?.Clear(); } catch { /* ignore */ }
+
+                            // 3) 레이블링 동기 실행 (한 장 처리)
+                            int added = AutoLabelFromCanvasSync();  // 아래 4) 코어
+
+                            // 4) 저장(기존 저장 로직 그대로 사용)
+                            //    - 기존 Ctrl+S 핸들러와 동일 동작
+                            OnSaveClick(_btnSave, null);
+
+                            if (added > 0) okCnt++; else okCnt++; // added=0이어도 저장 자체는 성공 흐름으로 간주
+                        }
+                        catch
+                        {
+                            failCnt++;
+                        }
+                    }
+
+                    overlay.Report(100, "완료");
+                }
+
+                new Guna.UI2.WinForms.Guna2MessageDialog
+                {
+                    Parent = this,
+                    Caption = "Batch Labeling",
+                    Text = $"총 {total}개\n성공: {okCnt}\n실패: {failCnt}",
+                    Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
+                    Icon = Guna.UI2.WinForms.MessageDialogIcon.Information,
+                    Style = Guna.UI2.WinForms.MessageDialogStyle.Light
+                }.Show();
+            }
+            catch (Exception ex)
+            {
+                new Guna.UI2.WinForms.Guna2MessageDialog
+                {
+                    Parent = this,
+                    Caption = "Batch Labeling",
+                    Text = "오류: " + ex.Message,
+                    Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
+                    Icon = Guna.UI2.WinForms.MessageDialogIcon.Error,
+                    Style = Guna.UI2.WinForms.MessageDialogStyle.Light
+                }.Show();
+            }
+        }
+        private static Bitmap LoadBitmapUnlocked(string path)
+        {
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var img = Image.FromStream(fs, useEmbeddedColorManagement: false, validateImageData: false))
+            {
+                return new Bitmap(img); // decouple stream
+            }
+        }
+
+        private void SetCanvasImageForBatch(Bitmap bmp)
+        {
+            // 프로젝트에 SetImage가 있으면 그걸 쓰고, 없으면 직접 할당
+            try
+            {
+                var prev = _canvas.Image as IDisposable;
+                _canvas.Image = new Bitmap(bmp);
+                prev?.Dispose();
+
+                // 뷰 초기화가 필요하면 여기서 (예: ZoomToFit 등)
+                try { _canvas.ZoomToFit(); } catch { /* optional */ }
+            }
+            catch { throw; }
+        }
+        private int AutoLabelFromCanvasSync()
+        {
+            if (_canvas == null || _canvas.Image == null) return 0;
+
+            // 1) 8비트 그레이 변환
+            using (Bitmap gray = GetCurrentImageGray8())
+            {
+                if (gray == null) return 0;
+
+                int w = gray.Width, h = gray.Height;
+                byte[] buf = LockBitsToArray(gray);
+
+                // 2) 0 제외 + 146 미만 (필터)
+                bool[,] bin = new bool[h, w];
+                int idx = 0, trueCount = 0;
+                for (int y = 0; y < h; y++)
+                {
+                    for (int x = 0; x < w; x++, idx++)
+                    {
+                        byte v = buf[idx];
+                        bool isFg = (v > 0 && v < COLORMAP_TARGET_VALUE);
+                        bin[y, x] = isFg;
+                        if (isFg) trueCount++;
+                    }
+                }
+
+                double fillRatio = (double)trueCount / (w * h);
+                if (fillRatio > 0.995)    // 배치에서는 지나치게 높으면 스킵
+                    return 0;
+
+                // 3) 방향별 확장/축소 + 전체 이동 (필요값은 네가 쓰던 값 그대로)
+                bin = DilateMaskDirectionalShifted(
+                                       bin,
+                                       left: -1,  // 왼쪽 1픽셀 줄이기
+                                       right: 0,  // 오른쪽 그대로
+                                       top: 0,    // 위 그대로
+                                       bottom: 5, // 아래쪽 2픽셀 확장 (주석과 일치하도록 0→2로 수정)
+                                       shiftX: +1, // 전체를 오른쪽 1픽셀 이동
+                                       shiftY: 0  // 전체를 아래쪽 2픽셀 이동
+                                   );
+
+                // 4) 가장자리 안정화: False 1px 패딩 후 컨투어, 좌표 원복
+                bool[,] binPadded = PadFalseBorder(bin);
+                List<List<PointF>> contoursPadded = TraceContours(binPadded);
+                List<List<PointF>> contours = UnpadContours(contoursPadded, 1f, 1f);
+                if (contours == null || contours.Count == 0) return 0;
+
+                // 5) 초경량 필터(점 개수 기반)
+                List<List<PointF>> filtered = new List<List<PointF>>(contours.Count);
+                foreach (var c in contours)
+                {
+                    if (c == null) continue;
+                    int n = c.Count;
+                    if (n < 10) continue;        // 작은 조각 컷
+                    if (n > 20000) continue;     // 비정상 방어
+                    filtered.Add(c);             // RDP/면적계산 없음
+                }
+
+                // 6) 폴리곤 추가
+                int added = 0;
+                foreach (var polyPts in filtered)
+                {
+                    if (CreatePolygonAndAdd(polyPts))
+                        added++;
+                }
+                return added;
+            }
+        }
+
+
+        private void OnAutoLabelFromColormap_LessThanThreshold()
+        {
+            Task.Run(() =>
+            {
+                try
+                {
+                    if (_canvas == null || _canvas.Image == null)
+                    {
+                        this.BeginInvoke((Action)(() => AddLog("⚠️ 이미지가 없습니다.")));
+                        return;
+                    }
+
+                    // 1) 현재 표시 이미지를 8비트 그레이로 변환
+                    Bitmap gray = GetCurrentImageGray8();
+                    if (gray == null)
+                    {
+                        this.BeginInvoke((Action)(() => AddLog("⚠️ 그레이스케일 변환 실패.")));
+                        return;
+                    }
+
+                    int w = gray.Width, h = gray.Height;
+                    byte[] buf = LockBitsToArray(gray);
+                    gray.Dispose();
+
+                    // 2) 0 제외, 146 미만 픽셀만 True
+                    bool[,] bin = new bool[h, w];
+                    int idx = 0, trueCount = 0;
+                    for (int y = 0; y < h; y++)
+                    {
+                        for (int x = 0; x < w; x++, idx++)
+                        {
+                            byte v = buf[idx];
+                            bool isFg = (v > 0 && v < COLORMAP_TARGET_VALUE);
+                            bin[y, x] = isFg;
+                            if (isFg) trueCount++;
+                        }
+                    }
+
+                    double fillRatio = (double)trueCount / (w * h);
+                    if (fillRatio > 0.95)
+                    {
+                        this.BeginInvoke((Action)(() =>
+                            AddLog("⚠️ 거의 전체가 foreground로 판정되어 레이블링을 건너뜁니다. (ratio=" +
+                                   fillRatio.ToString("0.000") + ")")));
+                        return;
+                    }
+
+                    bin = DilateMaskDirectionalShifted(
+                        bin,
+                        left: -1,  // 왼쪽 1픽셀 줄이기
+                        right: 0,  // 오른쪽 그대로
+                        top: 0,    // 위 그대로
+                        bottom: 5, // 아래쪽 2픽셀 확장 (주석과 일치하도록 0→2로 수정)
+                        shiftX: +1, // 전체를 오른쪽 1픽셀 이동
+                        shiftY: 0  // 전체를 아래쪽 2픽셀 이동
+                    );
+
+                    // === 가장자리 붙은 영역도 안정적으로 잡기 위해 1픽셀 False 패딩 ===
+                    bool[,] binPadded = PadFalseBorder(bin);
+
+                    // 3) 외곽선 추출 (패딩 상태에서)
+                    List<List<PointF>> contoursPadded = TraceContours(binPadded);
+
+                    // 3-1) 좌표를 원래 이미지 기준으로 되돌림
+                    List<List<PointF>> contours = UnpadContours(contoursPadded, 1f, 1f);
+
+                    if (contours == null || contours.Count == 0)
+                    {
+                        this.BeginInvoke((Action)(() => AddLog("ℹ️ 감지된 컨투어가 없습니다.")));
+                        return;
+                    }
+
+                    // 4) 노이즈 필터 + 조건부 단순화
+                    List<List<PointF>> filtered = new List<List<PointF>>(contours.Count);
+                    foreach (var c in contours)
+                    {
+                        if (c == null) continue;
+                        int n = c.Count;
+                        if (n < 10) continue;       // 너무 작은 조각(<=10점) 스킵
+                        if (n > 20000) continue;    // 비정상적으로 큰 컨투어 방어
+
+                        // 단순히 꼭짓점 개수로만 노이즈 필터
+                        // (면적 계산 없음, RDP 없음 → 매우 빠름)
+                        filtered.Add(c);
+                    }
+
+                    // 5) 폴리곤 추가 (PolygonShape 생성자 사용)
+                    int added = 0;
+                    foreach (List<PointF> polyPts in filtered)
+                    {
+                        if (CreatePolygonAndAdd(polyPts))
+                            added++;
+                    }
+
+                    // 6) UI 업데이트
+                    this.BeginInvoke((Action)(() =>
+                    {
+                        _canvas.Invalidate();
+                        AddLog("Ctrl+U → " + added + "개 라벨링 완료");
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    this.BeginInvoke((Action)(() =>
+                        AddLog("❌ Ctrl+U 실패: " + ex.Message)));
+                }
+            });
+        }
+
+        /// <summary>
+        /// 마스크를 방향별로 확장/축소하고, 전체를 지정한 만큼 평행이동한다.
+        /// left/right/top/bottom: 각 방향 확장(+)/축소(-)
+        /// shiftX/shiftY: 전체 마스크 이동 (양수→오른쪽/아래쪽, 음수→왼쪽/위쪽)
+        /// </summary>
+        private static bool[,] DilateMaskDirectionalShifted(
+            bool[,] src,
+            int left, int right, int top, int bottom,
+            int shiftX, int shiftY)
+        {
+            int h = src.GetLength(0);
+            int w = src.GetLength(1);
+            bool[,] tmp = new bool[h, w];
+
+            // 1️⃣ 먼저 방향별 팽창/축소
+            for (int y = 0; y < h; y++)
+            {
+                for (int x = 0; x < w; x++)
+                {
+                    if (!src[y, x]) continue;
+
+                    int x0 = Math.Max(0, x + left);
+                    int x1 = Math.Min(w - 1, x + right);
+                    int y0 = Math.Max(0, y + top);
+                    int y1 = Math.Min(h - 1, y + bottom);
+
+                    for (int yy = y0; yy <= y1; yy++)
+                    {
+                        for (int xx = x0; xx <= x1; xx++)
+                        {
+                            tmp[yy, xx] = true;
+                        }
+                    }
+                }
+            }
+
+            // 2️⃣ 전체 평행 이동
+            bool[,] dst = new bool[h, w];
+            for (int y = 0; y < h; y++)
+            {
+                int yy = y + shiftY;
+                if (yy < 0 || yy >= h) continue;
+
+                for (int x = 0; x < w; x++)
+                {
+                    int xx = x + shiftX;
+                    if (xx < 0 || xx >= w) continue;
+
+                    if (tmp[y, x])
+                        dst[yy, xx] = true;
+                }
+            }
+
+            return dst;
+        }
+
+
+        // ===== 현재 캔버스 이미지 → 8비트 그레이 변환 =====
+        private Bitmap GetCurrentImageGray8()
+        {
+            Bitmap src = _canvas.Image as Bitmap;
+            if (src == null) return null;
+
+            // 24bpp로 그린 뒤 Gray로 변환(플랫폼 호환성/안정성 우선)
+            Bitmap tmp = new Bitmap(src.Width, src.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            using (Graphics g = Graphics.FromImage(tmp)) g.DrawImage(src, 0, 0, src.Width, src.Height);
+
+            Bitmap gray = new Bitmap(src.Width, src.Height, System.Drawing.Imaging.PixelFormat.Format8bppIndexed);
+            SetGrayPalette(gray);
+
+            Rectangle rect = new Rectangle(0, 0, tmp.Width, tmp.Height);
+            BitmapData bd24 = tmp.LockBits(rect, ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            BitmapData bd8 = gray.LockBits(rect, ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format8bppIndexed);
+
+            try
+            {
+                unsafe
+                {
+                    byte* p24 = (byte*)bd24.Scan0;
+                    byte* p8 = (byte*)bd8.Scan0;
+                    int s24 = bd24.Stride;
+                    int s8 = bd8.Stride;
+
+                    for (int y = 0; y < tmp.Height; y++)
+                    {
+                        byte* row24 = p24 + y * s24;
+                        byte* row8 = p8 + y * s8;
+                        for (int x = 0; x < tmp.Width; x++)
+                        {
+                            byte b = row24[x * 3 + 0];
+                            byte g2 = row24[x * 3 + 1];
+                            byte r = row24[x * 3 + 2];
+                            int yv = (r * 299 + g2 * 587 + b * 114 + 500) / 1000; // BT.601 근사
+                            if (yv < 0) yv = 0; else if (yv > 255) yv = 255;
+                            row8[x] = (byte)yv;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                tmp.UnlockBits(bd24);
+                gray.UnlockBits(bd8);
+                tmp.Dispose();
+            }
+            return gray;
+        }
+
+        private static void SetGrayPalette(Bitmap bmp8)
+        {
+            ColorPalette pal = bmp8.Palette;
+            for (int i = 0; i < 256; i++) pal.Entries[i] = Color.FromArgb(i, i, i);
+            bmp8.Palette = pal;
+        }
+
+        private static byte[] LockBitsToArray(Bitmap gray8)
+        {
+            Rectangle rect = new Rectangle(0, 0, gray8.Width, gray8.Height);
+            BitmapData bd = gray8.LockBits(rect, ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format8bppIndexed);
+            try
+            {
+                int h = gray8.Height, w = gray8.Width;
+                byte[] buf = new byte[h * w];
+                int stride = bd.Stride;
+                unsafe
+                {
+                    byte* p = (byte*)bd.Scan0;
+                    int dst = 0;
+                    for (int y = 0; y < h; y++)
+                    {
+                        Marshal.Copy(new IntPtr(p + y * stride), buf, dst, w);
+                        dst += w;
+                    }
+                }
+                return buf;
+            }
+            finally
+            {
+                gray8.UnlockBits(bd);
+            }
+        }
+
+        // ===== 외곽선(모어 이웃) =====
+        private static readonly int[,] Moore = new int[,]
+        {
+    {  1,  0 }, { 1,  1 }, { 0,  1 }, { -1,  1 },
+    { -1, 0 }, { -1,-1 }, { 0, -1 }, {  1, -1 }
+        };
+
+        private static List<List<PointF>> TraceContours(bool[,] bin)
+        {
+            int h = bin.GetLength(0), w = bin.GetLength(1);
+            bool[,] visited = new bool[h, w];
+            List<List<PointF>> contours = new List<List<PointF>>();
+
+            for (int y = 1; y < h - 1; y++)
+            {
+                for (int x = 1; x < w - 1; x++)
+                {
+                    if (!bin[y, x] || visited[y, x]) continue;
+
+                    bool isBorder = false;
+                    for (int k = 0; k < 8; k++)
+                    {
+                        int nx = x + Moore[k, 0];
+                        int ny = y + Moore[k, 1];
+                        if (nx < 0 || ny < 0 || nx >= w || ny >= h || !bin[ny, nx])
+                        {
+                            isBorder = true; break;
+                        }
+                    }
+                    if (!isBorder) { visited[y, x] = true; continue; }
+
+                    List<PointF> c = FollowBorder(bin, visited, x, y);
+                    if (c != null && c.Count >= 3) contours.Add(c);
+                }
+            }
+            return contours;
+        }
+
+        private static List<PointF> FollowBorder(bool[,] bin, bool[,] visited, int sx, int sy)
+        {
+            int h = bin.GetLength(0), w = bin.GetLength(1);
+            List<PointF> pts = new List<PointF>(128);
+
+            int cx = sx, cy = sy;
+            int dir = 0; // 진행 시작각
+
+            pts.Add(new PointF(cx + 0.5f, cy + 0.5f));
+            visited[cy, cx] = true;
+
+            int maxIter = w * h * 4;
+            int iter = 0;
+
+            while (iter++ < maxIter)
+            {
+                bool moved = false;
+                for (int i = 0; i < 8; i++)
+                {
+                    int k = (dir + i) % 8;
+                    int nx = cx + Moore[k, 0];
+                    int ny = cy + Moore[k, 1];
+                    if (nx <= 0 || ny <= 0 || nx >= w - 1 || ny >= h - 1) continue;
+
+                    if (bin[ny, nx])
+                    {
+                        if (pts.Count == 1 || pts[pts.Count - 1].X != nx + 0.5f || pts[pts.Count - 1].Y != ny + 0.5f)
+                            pts.Add(new PointF(nx + 0.5f, ny + 0.5f));
+
+                        cx = nx; cy = ny;
+                        visited[cy, cx] = true;
+
+                        dir = (k + 6) % 8; // 내부를 타이트하게
+                        moved = true;
+                        break;
+                    }
+                }
+                if (!moved) break;
+                if (cx == sx && cy == sy && pts.Count > 3) break;
+            }
+
+            if (pts.Count >= 3)
+            {
+                if (pts[0] != pts[pts.Count - 1]) pts.Add(pts[0]);
+                return pts;
+            }
+            return null;
+        }
+
+        // ===== 기하 유틸 =====
+        private static float PolygonArea(List<PointF> p)
+        {
+            double a = 0;
+            for (int i = 0; i < p.Count - 1; i++)
+                a += (double)p[i].X * p[i + 1].Y - (double)p[i + 1].X * p[i].Y;
+            return (float)(a * 0.5);
+        }
+        private static float PolyPerimeter(List<PointF> p)
+        {
+            double s = 0;
+            for (int i = 0; i < p.Count - 1; i++)
+            {
+                double dx = p[i + 1].X - p[i].X;
+                double dy = p[i + 1].Y - p[i].Y;
+                s += Math.Sqrt(dx * dx + dy * dy);
+            }
+            return (float)s;
+        }
+
+        // ===== RDP 단순화 =====
+        private static List<PointF> RdpSimplify(List<PointF> pts, float eps)
+        {
+            if (pts == null || pts.Count <= 3) return pts;
+
+            bool closed = (pts[0] == pts[pts.Count - 1]);
+            List<PointF> src = closed ? new List<PointF>(pts.GetRange(0, pts.Count - 1)) : new List<PointF>(pts);
+
+            bool[] keep = new bool[src.Count];
+            for (int i = 0; i < keep.Length; i++) keep[i] = false;
+            keep[0] = true; keep[src.Count - 1] = true;
+
+            RdpRec(src, 0, src.Count - 1, eps, keep);
+
+            List<PointF> outp = new List<PointF>();
+            for (int i = 0; i < src.Count; i++) if (keep[i]) outp.Add(src[i]);
+            if (closed && outp.Count > 0) outp.Add(outp[0]);
+            return outp;
+        }
+        private static void RdpRec(List<PointF> pts2, int s, int e, float eps2, bool[] keep2)
+        {
+            float dmax = 0f; int idx = -1;
+            PointF A = pts2[s]; PointF B = pts2[e];
+
+            for (int i = s + 1; i < e; i++)
+            {
+                float d = PerpDist(pts2[i], A, B);
+                if (d > dmax) { dmax = d; idx = i; }
+            }
+            if (dmax > eps2 && idx > 0)
+            {
+                keep2[idx] = true;
+                RdpRec(pts2, s, idx, eps2, keep2);
+                RdpRec(pts2, idx, e, eps2, keep2);
+            }
+        }
+        private static float PerpDist(PointF P, PointF A, PointF B)
+        {
+            float dx = B.X - A.X, dy = B.Y - A.Y;
+            if (dx == 0f && dy == 0f) return CalcDist(P, A);
+            float t = ((P.X - A.X) * dx + (P.Y - A.Y) * dy) / (dx * dx + dy * dy);
+            float xx = A.X + t * dx, yy = A.Y + t * dy;
+            return CalcDist(P, new PointF(xx, yy));
+        }
+        private static float CalcDist(PointF a, PointF b)
+        {
+            float dx = a.X - b.X, dy = a.Y - b.Y;
+            return (float)Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        // ===== 실제 폴리곤 추가(프로젝트 API에 맞게 필요 시 수정) =====
+        private bool CreatePolygonAndAdd(List<PointF> ptsImg)
+        {
+            try
+            {
+                if (_canvas == null || ptsImg == null || ptsImg.Count < 3)
+                    return false;
+
+                // PolygonShape는 IEnumerable<PointF> 생성자를 가짐
+                var poly = new PolygonShape(ptsImg);
+                poly.LabelName = _labelWin.LabelName;   // (프로젝트에 맞게) 현재 활성 라벨명 할당
+                poly.StrokeColor = _labelWin.SelectedColor;
+
+                if (_canvas.Shapes == null)
+                    return false;
+
+                _canvas.Shapes.Add(poly);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+
+
         #endregion
 
         #endregion
