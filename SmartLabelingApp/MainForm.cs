@@ -2534,7 +2534,7 @@ namespace SmartLabelingApp
         {
             if (keyData == (Keys.Control | Keys.U))
             {
-                OnAutoLabelFromColormap_LessThanThreshold();
+                OnAutoLabelFromColormap_LessThanThreshold(500);
 
                 return true;
             }
@@ -5784,7 +5784,7 @@ namespace SmartLabelingApp
             return outList;
         }
 
-        private void OnAutoLabelFromColormap_LessThanThreshold()
+        private void OnAutoLabelFromColormap_LessThanThreshold(int minAreaPixels = 0)
         {
             Task.Run(() =>
             {
@@ -5936,9 +5936,18 @@ namespace SmartLabelingApp
                     foreach (var c in contours)
                     {
                         if (c == null) continue;
+
                         int n = c.Count;
-                        if (n < 10) continue;     // 너무 작은 조각
+                        if (n < 10) continue;     // 너무 적은 점수(이건 그대로 둬도 좋음)
                         if (n > 20000) continue;  // 비정상적으로 큰 컨투어 방어
+
+                        // --- 면적 계산 (Shoelace formula) ---
+                        double area = Math.Abs(ComputePolygonArea(c)); // 픽셀^2 단위 정도
+
+                        // minAreaPixels가 0보다 크면, 그 값보다 작은 라벨은 버림
+                        if (minAreaPixels > 0 && area < minAreaPixels)
+                            continue;
+
                         filtered.Add(c);
                     }
 
@@ -5970,6 +5979,20 @@ namespace SmartLabelingApp
         }
 
 
+        private static double ComputePolygonArea(IList<PointF> pts)
+        {
+            int n = pts.Count;
+            if (n < 3) return 0.0;
+
+            double sum = 0.0;
+            for (int i = 0; i < n; i++)
+            {
+                var p0 = pts[i];
+                var p1 = pts[(i + 1) % n];
+                sum += (double)p0.X * p1.Y - (double)p1.X * p0.Y;
+            }
+            return 0.5 * sum; // 호출할 때 Math.Abs()로 부호 제거
+        }
 
 
         /// <summary>
