@@ -20,7 +20,7 @@ namespace SmartLabelingApp
     {
         public const int Epochs = 20;   // GPU용 epoch
         
-        public const int ImgSize = 640;
+        public const int ImgSize = 512;
         public const int BatchGpu = 8;
         public const int BatchCpu = 4;
         public const string DeviceGpu = "0";

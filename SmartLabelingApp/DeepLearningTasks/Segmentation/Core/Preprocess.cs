@@ -22,7 +22,7 @@ namespace SmartLabelingApp
     
     public static class Preprocess
     {
-        public const int DefaultNet = 640;
+        public const int DefaultNet = 512;
 
         /// <summary>
         /// 원본 Bitmap을 네트 입력(net×net)에 맞게 레터박스 후, outNCHW 버퍼([1,3,net,net])에 채웁니다.

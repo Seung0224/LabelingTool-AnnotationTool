@@ -44,8 +44,11 @@ namespace SmartLabelingApp
         #region 1) Constants & Static Data (상수/정적 데이터)
 
 
-        private const byte COLORMAP_TARGET_START_VALUE = 146;
-        private const byte COLORMAP_TARGET_END_VALUE = 255;
+        private const byte COLORMAP_TARGET_START_VALUE_8 = 146;
+        private const byte COLORMAP_TARGET_END_VALUE_8 = 255;
+
+        private const ushort COLORMAP_TARGET_START_VALUE_16 = 36828;
+        private const ushort COLORMAP_TARGET_END_VALUE_16 = 65535;
 
         private const string DEFAULT_MODEL_PATH = @"D:\SLA_Model\AnnotationData\best.onnx";
         private string _currentModelName = "UNKNOWN";
@@ -2532,12 +2535,12 @@ namespace SmartLabelingApp
             if (keyData == (Keys.Control | Keys.U))
             {
                 OnAutoLabelFromColormap_LessThanThreshold();
-                // RunAutoLabelBatchForFolder();
+
                 return true;
             }
             if (keyData == (Keys.Control | Keys.O))
             {
-                RunColorMapBatchToDesktop(COLORMAP_TARGET_START_VALUE, COLORMAP_TARGET_END_VALUE);
+                RunColorMapBatchToDesktop();
                 return true;
             }
             if (keyData == (Keys.Control | Keys.S))
@@ -4157,7 +4160,7 @@ namespace SmartLabelingApp
                     if (_onnxSession != null)
                     {
                         // ---------------- ONNX 경로 ----------------
-                        var res = SegmentationInfer.InferOnnx(_onnxSession, srcCopy);
+                        var res = SegmentationInfer.InferOnnx(_onnxSession, srcCopy, conf: 0.1f, iou: 0.1f);
 
                         var swOverlay = System.Diagnostics.Stopwatch.StartNew();
                         // 공통 오버레이: ONNX 스타일의 그림을 두 백엔드 공통으로
@@ -5439,12 +5442,10 @@ namespace SmartLabelingApp
             finally { _cmBusy = false; }
         }
 
-        private void RunColorMapBatchToDesktop(ushort min, ushort max)
+        private void RunColorMapBatchToDesktop()
         {
             try
             {
-                if (min >= max) throw new ArgumentException("min must be smaller than max.");
-
                 var baseDir = GetCurrentImageFolder();
                 if (string.IsNullOrEmpty(baseDir) || !Directory.Exists(baseDir))
                 {
@@ -5491,10 +5492,43 @@ namespace SmartLabelingApp
                         string nameNoExt = Path.GetFileNameWithoutExtension(src);
                         string dst = Path.Combine(outDir, nameNoExt + ".png");
 
-                        overlay.Report((i * 100) / Math.Max(1, total), $"{i + 1}/{total} - {Path.GetFileName(src)}");
+                        // === 개별 파일 기준으로 8/16bit 판정 (PixelFormat 사용 X, WIC만 사용) ===
+                        bool is16bit = false;
+                        try
+                        {
+                            if (TryLoadGray16WithWIC(src, out var tmp16, out int w0, out int h0))
+                            {
+                                is16bit = true;
+                            }
+                        }
+                        catch
+                        {
+                            is16bit = false;
+                        }
+
+                        ushort min, max;
+                        if (is16bit)
+                        {
+                            // 16bit: 0~65535 전체 범위
+                            min = COLORMAP_TARGET_START_VALUE_16;
+                            max = COLORMAP_TARGET_END_VALUE_16;
+                        }
+                        else
+                        {
+                            // 8bit or 컬러: 0~255 전체 범위
+                            min = COLORMAP_TARGET_START_VALUE_8;
+                            max = COLORMAP_TARGET_END_VALUE_8;
+                        }
+
+                        overlay.Report(
+                            (i * 100) / Math.Max(1, total),
+                            $"{i + 1}/{total} - {Path.GetFileName(src)}"
+                            + (is16bit ? " (16bit, 0~65535)" : " (8bit, 0~255)")
+                        );
 
                         try
                         {
+                            // 내부에서 Gray16/8bit에 맞게 컬러맵 적용
                             bool ok = ApplyColorMapAndSaveOne(src, dst, min, max);
                             if (ok) okCnt++; else failCnt++;
                         }
@@ -5530,6 +5564,10 @@ namespace SmartLabelingApp
                 }.Show();
             }
         }
+
+
+
+
 
         private bool ApplyColorMapAndSaveOne(string srcPath, string dstPath, ushort min, ushort max)
         {
@@ -5746,200 +5784,6 @@ namespace SmartLabelingApp
             return outList;
         }
 
-        private void RunAutoLabelBatchForFolder()
-        {
-            try
-            {
-                var baseDir = GetCurrentImageFolder();
-                if (string.IsNullOrEmpty(baseDir) || !Directory.Exists(baseDir))
-                {
-                    new Guna.UI2.WinForms.Guna2MessageDialog
-                    {
-                        Parent = this,
-                        Caption = "Batch Labeling",
-                        Text = "현재 이미지의 기준 폴더를 찾을 수 없습니다.",
-                        Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
-                        Icon = Guna.UI2.WinForms.MessageDialogIcon.Warning,
-                        Style = Guna.UI2.WinForms.MessageDialogStyle.Light
-                    }.Show();
-                    return;
-                }
-
-                var paths = EnumerateTopImagesInFolder(baseDir)
-                            .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
-                            .ToList();
-
-                if (paths.Count == 0)
-                {
-                    new Guna.UI2.WinForms.Guna2MessageDialog
-                    {
-                        Parent = this,
-                        Caption = "Batch Labeling",
-                        Text = "처리할 이미지가 없습니다.",
-                        Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
-                        Icon = Guna.UI2.WinForms.MessageDialogIcon.Warning,
-                        Style = Guna.UI2.WinForms.MessageDialogStyle.Light
-                    }.Show();
-                    return;
-                }
-
-                int total = paths.Count;
-                int okCnt = 0, failCnt = 0;
-
-                using (var overlay = new ProgressOverlay(this, "Batch Labeling...", true))
-                {
-                    for (int i = 0; i < total; i++)
-                    {
-                        string src = paths[i];
-                        overlay.Report((i * 100) / Math.Max(1, total),
-                                       $"{i + 1}/{total} - {Path.GetFileName(src)}");
-
-                        try
-                        {
-                            // 1) 이미지 로드
-                            using (var bmp = LoadBitmapUnlocked(src))
-                            {
-                                SetCanvasImageForBatch(bmp); // 캔버스 이미지 교체 + ZoomToFit 등
-                            }
-
-                            // 2) 기존 도형 초기화(겹침 방지)
-                            try { _canvas.Shapes?.Clear(); } catch { /* ignore */ }
-
-                            // 3) 자동 레이블링(컬러맵 기반) 한 장 처리
-                            int added = AutoLabelFromCanvasSync(); // 이전에 만든 동기 코어 사용
-
-                            // 4) 저장 경로 주입 → 기존 저장 로직 호출
-                            _savePathOverride = src;
-                            OnSaveClick(_btnSave, null);
-
-                            okCnt++;
-                        }
-                        catch
-                        {
-                            failCnt++;
-                        }
-                    }
-
-                    overlay.Report(100, "완료");
-                }
-
-                new Guna.UI2.WinForms.Guna2MessageDialog
-                {
-                    Parent = this,
-                    Caption = "Batch Labeling",
-                    Text = $"총 {total}개\n성공: {okCnt}\n실패: {failCnt}",
-                    Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
-                    Icon = Guna.UI2.WinForms.MessageDialogIcon.Information,
-                    Style = Guna.UI2.WinForms.MessageDialogStyle.Light
-                }.Show();
-            }
-            catch (Exception ex)
-            {
-                new Guna.UI2.WinForms.Guna2MessageDialog
-                {
-                    Parent = this,
-                    Caption = "Batch Labeling",
-                    Text = "오류: " + ex.Message,
-                    Buttons = Guna.UI2.WinForms.MessageDialogButtons.OK,
-                    Icon = Guna.UI2.WinForms.MessageDialogIcon.Error,
-                    Style = Guna.UI2.WinForms.MessageDialogStyle.Light
-                }.Show();
-            }
-        }
-
-        private static Bitmap LoadBitmapUnlocked(string path)
-        {
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (var img = Image.FromStream(fs, useEmbeddedColorManagement: false, validateImageData: false))
-            {
-                return new Bitmap(img); // decouple stream
-            }
-        }
-
-        private void SetCanvasImageForBatch(Bitmap bmp)
-        {
-            // 프로젝트에 SetImage가 있으면 그걸 쓰고, 없으면 직접 할당
-            try
-            {
-                var prev = _canvas.Image as IDisposable;
-                _canvas.Image = new Bitmap(bmp);
-                prev?.Dispose();
-
-                // 뷰 초기화가 필요하면 여기서 (예: ZoomToFit 등)
-                try { _canvas.ZoomToFit(); } catch { /* optional */ }
-            }
-            catch { throw; }
-        }
-        private int AutoLabelFromCanvasSync()
-        {
-            if (_canvas == null || _canvas.Image == null) return 0;
-
-            // 1) 8비트 그레이 변환
-            using (Bitmap gray = GetCurrentImageGray8())
-            {
-                if (gray == null) return 0;
-
-                int w = gray.Width, h = gray.Height;
-                byte[] buf = LockBitsToArray(gray);
-
-                // 2) 0 제외 + 146 미만 (필터)
-                bool[,] bin = new bool[h, w];
-                int idx = 0, trueCount = 0;
-                for (int y = 0; y < h; y++)
-                {
-                    for (int x = 0; x < w; x++, idx++)
-                    {
-                        byte v = buf[idx];
-                        bool isFg = (v > 0 && v < COLORMAP_TARGET_START_VALUE);
-                        bin[y, x] = isFg;
-                        if (isFg) trueCount++;
-                    }
-                }
-
-                double fillRatio = (double)trueCount / (w * h);
-                if (fillRatio > 0.995)    // 배치에서는 지나치게 높으면 스킵
-                    return 0;
-
-                // 3) 방향별 확장/축소 + 전체 이동 (필요값은 네가 쓰던 값 그대로)
-                bin = DilateMaskDirectionalShifted(
-                                       bin,
-                                       left: -1,  // 왼쪽 1픽셀 줄이기
-                                       right: 0,  // 오른쪽 그대로
-                                       top: 0,    // 위 그대로
-                                       bottom: 5, // 아래쪽 2픽셀 확장 (주석과 일치하도록 0→2로 수정)
-                                       shiftX: +1, // 전체를 오른쪽 1픽셀 이동
-                                       shiftY: 0  // 전체를 아래쪽 2픽셀 이동
-                                   );
-
-                // 4) 가장자리 안정화: False 1px 패딩 후 컨투어, 좌표 원복
-                bool[,] binPadded = PadFalseBorder(bin);
-                List<List<PointF>> contoursPadded = TraceContours(binPadded);
-                List<List<PointF>> contours = UnpadContours(contoursPadded, 1f, 1f);
-                if (contours == null || contours.Count == 0) return 0;
-
-                // 5) 초경량 필터(점 개수 기반)
-                List<List<PointF>> filtered = new List<List<PointF>>(contours.Count);
-                foreach (var c in contours)
-                {
-                    if (c == null) continue;
-                    int n = c.Count;
-                    if (n < 10) continue;        // 작은 조각 컷
-                    if (n > 20000) continue;     // 비정상 방어
-                    filtered.Add(c);             // RDP/면적계산 없음
-                }
-
-                // 6) 폴리곤 추가
-                int added = 0;
-                foreach (var polyPts in filtered)
-                {
-                    if (CreatePolygonAndAdd(polyPts))
-                        added++;
-                }
-                return added;
-            }
-        }
-
-
         private void OnAutoLabelFromColormap_LessThanThreshold()
         {
             Task.Run(() =>
@@ -5952,32 +5796,110 @@ namespace SmartLabelingApp
                         return;
                     }
 
-                    // 1) 현재 표시 이미지를 8비트 그레이로 변환
-                    Bitmap gray = GetCurrentImageGray8();
-                    if (gray == null)
+                    // ========================= 1) 원본 경로 확인 =========================
+                    if (string.IsNullOrEmpty(_currentImagePath))
                     {
-                        this.BeginInvoke((Action)(() => AddLog("⚠️ 그레이스케일 변환 실패.")));
-                        return;
+                        // 원본 경로가 없으면 WIC로 비트깊이 판정 불가 → 8bit로만 처리
+                        // (필요하면 여기서 바로 return 해도 되고, 일단 8bit로 진행)
+                        AddLog("ℹ️ _currentImagePath 없음 → 8bit 그레이 기준으로 레이블링합니다.");
                     }
 
-                    int w = gray.Width, h = gray.Height;
-                    byte[] buf = LockBitsToArray(gray);
-                    gray.Dispose();
+                    bool use16 = false;
+                    int w = 0, h = 0;
+                    ushort[] buf16 = null;
+                    byte[] buf8 = null;
+                    Bitmap gray8 = null;
 
-                    // 2) 0 제외, 146 미만 픽셀만 True
-                    bool[,] bin = new bool[h, w];
-                    int idx = 0, trueCount = 0;
-                    for (int y = 0; y < h; y++)
+                    // ========================= 2) WIC로 Gray16 시도 =========================
+                    if (!string.IsNullOrEmpty(_currentImagePath) &&
+                        TryLoadGray16WithWIC(_currentImagePath, out buf16, out w, out h))
                     {
-                        for (int x = 0; x < w; x++, idx++)
+                        // ★ 여기서가 핵심: "원본 파일을 WIC로 Gray16으로 읽을 수 있냐 없냐"로 결정
+                        use16 = true;
+
+                        // 캔버스 이미지와 크기가 다르면 좌표가 어긋날 수 있으므로 체크
+                        if (w != _canvas.Image.Width || h != _canvas.Image.Height)
                         {
-                            byte v = buf[idx];
-                            bool isFg = (v > 0 && v < COLORMAP_TARGET_START_VALUE);
-                            bin[y, x] = isFg;
-                            if (isFg) trueCount++;
+                            AddLog($"⚠️ Gray16 로드 크기({w}x{h})와 Canvas 크기({_canvas.Image.Width}x{_canvas.Image.Height})가 달라 8bit 기준으로 다시 처리합니다.");
+                            use16 = false;
+                            buf16 = null;
                         }
                     }
 
+                    // ========================= 3) 8bit 버퍼 준비 (fallback 포함) =========================
+                    if (!use16)
+                    {
+                        // 캔버스 이미지를 8bit 그레이로 변환
+                        gray8 = GetCurrentImageGray8();
+                        if (gray8 == null)
+                        {
+                            this.BeginInvoke((Action)(() => AddLog("⚠️ 8bit 그레이 변환 실패.")));
+                            return;
+                        }
+
+                        w = gray8.Width;
+                        h = gray8.Height;
+                        buf8 = LockBitsToArray(gray8); // 너가 이미 쓰던 helper
+                        if (buf8 == null || buf8.Length < w * h)
+                        {
+                            gray8.Dispose();
+                            this.BeginInvoke((Action)(() => AddLog("⚠️ 8bit 버퍼 길이가 이미지 크기와 맞지 않습니다.")));
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        // 16bit 경로에서 w, h, buf16은 이미 세팅되어 있음
+                        if (buf16 == null || buf16.Length < w * h)
+                        {
+                            this.BeginInvoke((Action)(() => AddLog("⚠️ 16bit 버퍼 길이가 이미지 크기와 맞지 않습니다.")));
+                            return;
+                        }
+                    }
+
+                    // ========================= 4) 바이너리 마스크 생성 =========================
+                    bool[,] bin = new bool[h, w];
+                    int trueCount = 0;
+
+                    if (use16)
+                    {
+                        // ----- 16bit: WIC Gray16 기준 -----
+                        int idx = 0;
+                        for (int y = 0; y < h; y++)
+                        {
+                            for (int x = 0; x < w; x++, idx++)
+                            {
+                                if (idx >= buf16.Length) break;
+                                ushort v = buf16[idx]; // 0~65535
+                                bool isFg = (v >= COLORMAP_TARGET_START_VALUE_16 && v <= COLORMAP_TARGET_END_VALUE_16);
+                                bin[y, x] = isFg;
+                                if (isFg) trueCount++;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // ----- 8bit: GetCurrentImageGray8() 기준 -----
+                        int idx = 0;
+                        for (int y = 0; y < h; y++)
+                        {
+                            for (int x = 0; x < w; x++, idx++)
+                            {
+                                byte v = buf8[idx]; // 0~255
+                                bool isFg = (v >= COLORMAP_TARGET_START_VALUE_8 && v <= COLORMAP_TARGET_END_VALUE_8);
+                                bin[y, x] = isFg;
+                                if (isFg) trueCount++;
+                            }
+                        }
+                    }
+
+                    if (gray8 != null)
+                    {
+                        gray8.Dispose();
+                        gray8 = null;
+                    }
+
+                    // ========================= 5) fill ratio 체크 =========================
                     double fillRatio = (double)trueCount / (w * h);
                     if (fillRatio > 0.95)
                     {
@@ -5987,23 +5909,20 @@ namespace SmartLabelingApp
                         return;
                     }
 
+                    // ========================= 6) 마스크 팽창 + 시프트 =========================
                     bin = DilateMaskDirectionalShifted(
                         bin,
-                        left: -1,  // 왼쪽 1픽셀 줄이기
-                        right: 0,  // 오른쪽 그대로
-                        top: 0,    // 위 그대로
-                        bottom: 5, // 아래쪽 2픽셀 확장 (주석과 일치하도록 0→2로 수정)
-                        shiftX: +1, // 전체를 오른쪽 1픽셀 이동
-                        shiftY: 0  // 전체를 아래쪽 2픽셀 이동
+                        left: -1,
+                        right: 0,
+                        top: 0,
+                        bottom: 5,
+                        shiftX: +1,
+                        shiftY: 0
                     );
 
-                    // === 가장자리 붙은 영역도 안정적으로 잡기 위해 1픽셀 False 패딩 ===
+                    // ========================= 7) 패딩 → 컨투어 추출 =========================
                     bool[,] binPadded = PadFalseBorder(bin);
-
-                    // 3) 외곽선 추출 (패딩 상태에서)
                     List<List<PointF>> contoursPadded = TraceContours(binPadded);
-
-                    // 3-1) 좌표를 원래 이미지 기준으로 되돌림
                     List<List<PointF>> contours = UnpadContours(contoursPadded, 1f, 1f);
 
                     if (contours == null || contours.Count == 0)
@@ -6012,21 +5931,18 @@ namespace SmartLabelingApp
                         return;
                     }
 
-                    // 4) 노이즈 필터 + 조건부 단순화
+                    // ========================= 8) 노이즈 필터 =========================
                     List<List<PointF>> filtered = new List<List<PointF>>(contours.Count);
                     foreach (var c in contours)
                     {
                         if (c == null) continue;
                         int n = c.Count;
-                        if (n < 10) continue;       // 너무 작은 조각(<=10점) 스킵
-                        if (n > 20000) continue;    // 비정상적으로 큰 컨투어 방어
-
-                        // 단순히 꼭짓점 개수로만 노이즈 필터
-                        // (면적 계산 없음, RDP 없음 → 매우 빠름)
+                        if (n < 10) continue;     // 너무 작은 조각
+                        if (n > 20000) continue;  // 비정상적으로 큰 컨투어 방어
                         filtered.Add(c);
                     }
 
-                    // 5) 폴리곤 추가 (PolygonShape 생성자 사용)
+                    // ========================= 9) 폴리곤 생성 및 추가 =========================
                     int added = 0;
                     foreach (List<PointF> polyPts in filtered)
                     {
@@ -6034,11 +5950,15 @@ namespace SmartLabelingApp
                             added++;
                     }
 
-                    // 6) UI 업데이트
+                    // ========================= 10) UI 갱신 =========================
                     this.BeginInvoke((Action)(() =>
                     {
                         _canvas.Invalidate();
-                        AddLog("Ctrl+U → " + added + "개 라벨링 완료");
+                        string modeText = use16
+                            ? "16bit(WIC Gray16) 기준"
+                            : "8bit(Gray 변환) 기준";
+
+                        AddLog($"Ctrl+U → {added}개 라벨링 완료 ({modeText})");
                     }));
                 }
                 catch (Exception ex)
@@ -6048,6 +5968,9 @@ namespace SmartLabelingApp
                 }
             });
         }
+
+
+
 
         /// <summary>
         /// 마스크를 방향별로 확장/축소하고, 전체를 지정한 만큼 평행이동한다.
@@ -6104,7 +6027,26 @@ namespace SmartLabelingApp
 
             return dst;
         }
+        private Bitmap GetCurrentImageGray()
+        {
+            if (_canvas == null || _canvas.Image == null)
+                return null;
 
+            if (!(_canvas.Image is Bitmap src))
+                return null;
+
+            PixelFormat fmt = src.PixelFormat;
+            int bpp = Image.GetPixelFormatSize(fmt);
+
+            if (fmt == PixelFormat.Format8bppIndexed ||
+                fmt == PixelFormat.Format16bppGrayScale ||
+                fmt == PixelFormat.Format32bppArgb)
+            {
+                return (Bitmap)src.Clone();
+            }
+
+            return GetCurrentImageGray8();  // 이미 구현돼 있다고 가정
+        }
 
         // ===== 현재 캔버스 이미지 → 8비트 그레이 변환 =====
         private Bitmap GetCurrentImageGray8()
